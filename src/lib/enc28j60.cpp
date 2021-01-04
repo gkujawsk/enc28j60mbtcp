@@ -455,8 +455,6 @@ void ENC28J60::packetSend(uint16_t len) {
             if (retry == 0) return;
         #endif
 
-    resume_last_transmission:
-
         // wait until transmission has finished; referring to the data sheet and
         // to the errata (Errata Issue 13; Example 1) you only need to wait until either
         // TXIF or TXERIF gets set; however this leads to hangs; apparently Microchip

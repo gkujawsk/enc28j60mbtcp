@@ -73,6 +73,7 @@ public:
     // }
 
     static void prepare (const char* fmt);
+    static void prepare (const uint8_t* fmt, byte length);
     static uint16_t length ();
     static void extract (uint16_t offset, uint16_t count, void* buf);
     static void cleanup ();

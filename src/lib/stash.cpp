@@ -145,6 +145,14 @@ void Stash::prepare (const char* fmt) {
     *segs++ = (uint32_t) fmt >> 16;
 }
 
+void Stash::prepare (const uint8_t* payload, byte length) {
+    Stash::load(WRITEBUF, 0);
+    uint16_t* segs = Stash::bufs[WRITEBUF].words;
+    *segs++ = length;
+    *segs++ = (uint32_t) payload;
+    *segs++ = (uint32_t) payload >> 16;
+}
+
 uint16_t Stash::length () {
     Stash::load(WRITEBUF, 0);
     return Stash::bufs[WRITEBUF].words[0];
@@ -153,88 +161,20 @@ uint16_t Stash::length () {
 void Stash::extract (uint16_t offset, uint16_t count, void* buf) {
     Stash::load(WRITEBUF, 0);
     uint16_t* segs = Stash::bufs[WRITEBUF].words;
-    const char* fmt PROGMEM = (const char*)((segs[2] << 16) | segs[1]);
-    segs += 2;
-    Stash stash;
-    char mode = '@', tmp[7], *ptr = NULL, *out = (char*) buf;
-    for (uint16_t i = 0; i < offset + count; ) {
-        char c = 0;
-        switch (mode) {
-        case '@': {
-            c = pgm_read_byte(fmt++);
-            if (c == 0)
-                return;
-            if (c != '$')
-                break;
-            uint32_t arg = *++segs;
-            arg |= *++segs << 16;
-            mode = pgm_read_byte(fmt++);
-            switch (mode) {
-            case 'D':
-                ether.wtoa(arg, tmp);
-                ptr = tmp;
-                break;
-            case 'S':
-            case 'F':
-            case 'E':
-                ptr = (char*) arg;
-                break;
-            case 'H':
-                stash.open(arg);
-                ptr = (char*) &stash;
-                break;
-            }
-            continue;
-        }
-        case 'D':
-        case 'S':
-            c = *ptr++;
-            break;
-        case 'F':
-            c = pgm_read_byte(ptr++);
-            break;
-        // case 'E':
-        //     c = eeprom_read_byte((byte*) ptr++);
-        //     break;
-        case 'H':
-            c = ((Stash*) ptr)->get();
-            break;
-        }
-        if (c == 0) {
-            mode = '@';
-            continue;
-        }
-        if (i >= offset)
-            *out++ = c;
-        ++i;
-    }
+    const char* fmt = (const char*)((segs[2] << 16) | segs[1]);
+    memcpy(buf, fmt, count);
+    return;
 }
 
 void Stash::cleanup () {
     Stash::load(WRITEBUF, 0);
     uint16_t* segs = Stash::bufs[WRITEBUF].words;
-#ifdef __AVR__
-    const char* fmt PROGMEM = (const char*) *++segs;
-#else
     const char* fmt PROGMEM = (const char*)((segs[2] << 16) | segs[1]);
     segs += 2;
-#endif
     for (;;) {
         char c = pgm_read_byte(fmt++);
         if (c == 0)
             break;
-        if (c == '$') {
-#ifdef __AVR__
-            uint16_t arg = *++segs;
-#else
-            uint32_t arg = *++segs;
-            arg |= *++segs << 16;
-#endif
-            if (pgm_read_byte(fmt++) == 'H') {
-                Stash stash (arg);
-                stash.release();
-            }
-        }
     }
 }
 

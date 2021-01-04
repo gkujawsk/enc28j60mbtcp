@@ -17,18 +17,12 @@
                 "${command:particle.getDebuggerSearchDir}"
             ],
             "configFiles": [
-                "interface/cmsis-dap.cfg",
+                "interface/stlink-v2.cfg",
                 "target/stm32f2x.cfg"
             ],
             "postAttachCommands": [
                 "monitor reset halt"
-            ],
-            "windows": {
-                "configFiles": [
-                    "interface\\cmsis-dap.cfg",
-                    "target\\stm32f2x.cfg"
-                ]
-            }
+            ]
         },
         {
             "type": "cortex-debug",

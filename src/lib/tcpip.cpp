@@ -35,7 +35,7 @@
 
 #define SERIAL_PRINT 0
 
-#define TCPCLIENT_SRC_PORT_H tcpclient_src_port_l << 1 | 0x01 //Source port (MSB) for TCP/IP client connections - hardcode all TCP/IP client connection from ports in range 2816-3071
+#define TCPCLIENT_SRC_PORT_H (rand() % 32762) << 1 | 0x01 //Source port (MSB) for TCP/IP client connections - hardcode all TCP/IP client connection from ports in range 2816-3071
 static uint8_t tcpclient_src_port_l=1; // Source port (LSB) for tcp/ip client connections - increments on each TCP/IP request
 static uint8_t tcp_fd; // a file descriptor, will be encoded into the port
 static uint8_t tcp_client_state; //TCP connection state: 1=Send SYN, 2=SYN sent awaiting SYN+ACK, 3=Established, 4=Not used, 5=Closing, 6=Closed
@@ -44,12 +44,6 @@ static uint8_t tcp_client_port_l; // Destination port (LSB) of TCP/IP client con
 static uint8_t (*client_tcp_result_cb)(uint8_t,uint8_t,uint16_t,uint16_t); // Pointer to callback function to handle response to current TCP/IP request
 static uint16_t (*client_tcp_datafill_cb)(uint8_t); //Pointer to callback function to handle payload data in response to current TCP/IP request
 static uint8_t www_fd; // ID of current http request (only one http request at a time - one of the 8 possible concurrent TCP/IP connections)
-static void (*client_browser_cb)(uint8_t,uint16_t,uint16_t); // Pointer to callback function to handle result of current HTTP request
-static const char *client_additionalheaderline; // Pointer to c-string additional http request header info
-static const char *client_postval;
-static const char *client_urlbuf; // Pointer to c-string path part of HTTP request URL
-static const char *client_urlbuf_var; // Pointer to c-string filename part of HTTP request URL
-static const char *client_hoststr; // Pointer to c-string hostname of current HTTP request
 static void (*icmp_cb)(uint8_t *ip); // Pointer to callback function for ICMP ECHO response handler (triggers when localhost receives ping response (pong))
 static uint8_t destmacaddr[ETH_LEN]; // storing both dns server and destination mac addresses, but at different times because both are never needed at same time.
 static boolean waiting_for_dns_mac = false; //might be better to use bit flags and bitmask operations for these conditions
@@ -64,11 +58,11 @@ static uint8_t waitgwmac; // Bitwise flags of gateway router status - see below 
 #define WGW_REFRESHING 4 // Refreshing but already have gateway MAC
 #define WGW_ACCEPT_ARP_REPLY 8 // Accept an ARP reply
 
+static uint16_t tcp_payload_length;
 static uint16_t info_data_len; // Length of TCP/IP payload
 static uint8_t seqnum = 0xa; // My initial tcp sequence number
 static uint8_t result_fd = 123; // Session id of last reply
 static const char* result_ptr; // Pointer to TCP/IP data
-static unsigned long SEQ; // TCP/IP sequence number
 
 #define CLIENTMSS 550
 #define TCP_DATA_START ((uint16_t)TCP_SRC_PORT_H_P+(gPB[TCP_HEADER_LEN_P]>>4)*4) // Get offset of TCP/IP payload data
@@ -106,6 +100,8 @@ static void setMACandIPs (const uint8_t *mac, const uint8_t *dst) {
     EtherCard::copyIp(gPB + IP_DST_P, dst);
     EtherCard::copyIp(gPB + IP_SRC_P, EtherCard::myip);
 }
+
+
 
 static uint8_t check_ip_message_is_from(const uint8_t *ip) {
     return memcmp(gPB + IP_SRC_P, ip, IP_LEN) == 0;
@@ -204,23 +200,8 @@ static void make_echo_reply_from_request(uint16_t len) {
     EtherCard::packetSend(len);
 }
 
-void EtherCard::makeUdpReply (const char *data,uint8_t datalen,uint16_t port) {
-    if (datalen>220)
-        datalen = 220;
-    gPB[IP_TOTLEN_H_P] = (IP_HEADER_LEN+UDP_HEADER_LEN+datalen) >>8;
-    gPB[IP_TOTLEN_L_P] = IP_HEADER_LEN+UDP_HEADER_LEN+datalen;
-    make_eth_ip();
-    gPB[UDP_DST_PORT_H_P] = gPB[UDP_SRC_PORT_H_P];
-    gPB[UDP_DST_PORT_L_P] = gPB[UDP_SRC_PORT_L_P];
-    gPB[UDP_SRC_PORT_H_P] = port>>8;
-    gPB[UDP_SRC_PORT_L_P] = port;
-    gPB[UDP_LEN_H_P] = (UDP_HEADER_LEN+datalen) >> 8;
-    gPB[UDP_LEN_L_P] = UDP_HEADER_LEN+datalen;
-    gPB[UDP_CHECKSUM_H_P] = 0;
-    gPB[UDP_CHECKSUM_L_P] = 0;
-    memcpy(gPB + UDP_DATA_P, data, datalen);
-    fill_checksum(UDP_CHECKSUM_H_P, IP_SRC_P, 16 + datalen,1);
-    packetSend(UDP_HEADER_LEN+IP_HEADER_LEN+ETH_HEADER_LEN+datalen);
+bool EtherCard::tcpconnected() {
+    return tcp_client_state == TCP_STATE_ESTABLISHED;
 }
 
 static void make_tcp_synack_from_syn() {
@@ -280,38 +261,21 @@ static void make_tcp_ack_with_data_noflags(uint16_t dlen) {
     EtherCard::packetSend(IP_HEADER_LEN+TCP_HEADER_LEN_PLAIN+dlen+ETH_HEADER_LEN);
 }
 
-void EtherCard::httpServerReply (uint16_t dlen) {
-    make_tcp_ack_from_any(info_data_len,0); // send ack for http get
-    gPB[TCP_FLAGS_P] = TCP_FLAGS_ACK_V|TCP_FLAGS_PUSH_V|TCP_FLAGS_FIN_V;
-    make_tcp_ack_with_data_noflags(dlen); // send data
-}
-
 static uint32_t getBigEndianLong(byte offs) { //get the sequence number of packets after an ack from GET
     return (((unsigned long)gPB[offs]*256+gPB[offs+1])*256+gPB[offs+2])*256+gPB[offs+3];
 } //thanks to mstuetz for the missing (unsigned long)
 
-static void setSequenceNumber(uint32_t seq) {
-    gPB[TCP_SEQ_H_P]   = (seq & 0xff000000 ) >> 24;
-    gPB[TCP_SEQ_H_P+1] = (seq & 0xff0000 ) >> 16;
-    gPB[TCP_SEQ_H_P+2] = (seq & 0xff00 ) >> 8;
-    gPB[TCP_SEQ_H_P+3] = (seq & 0xff );
-}
+// static void setSequenceNumber(uint32_t seq) {
+//     gPB[TCP_SEQ_H_P]   = (seq & 0xff000000 ) >> 24;
+//     gPB[TCP_SEQ_H_P+1] = (seq & 0xff0000 ) >> 16;
+//     gPB[TCP_SEQ_H_P+2] = (seq & 0xff00 ) >> 8;
+//     gPB[TCP_SEQ_H_P+3] = (seq & 0xff );
+// }
 
 uint32_t EtherCard::getSequenceNumber() {
     return getBigEndianLong(TCP_SEQ_H_P);
 }
 
-void EtherCard::httpServerReplyAck () {
-    make_tcp_ack_from_any(getTcpPayloadLength(),0); // send ack for http request
-    SEQ = getSequenceNumber(); //get the sequence number of packets after an ack from GET
-}
-
-void EtherCard::httpServerReply_with_flags (uint16_t dlen , uint8_t flags) {
-    setSequenceNumber(SEQ);
-    gPB[TCP_FLAGS_P] = flags; // final packet
-    make_tcp_ack_with_data_noflags(dlen); // send data
-    SEQ=SEQ+dlen;
-}
 
 void EtherCard::clientIcmpRequest(const uint8_t *destip) {
     if(is_lan(EtherCard::myip, destip)) {
@@ -338,112 +302,6 @@ void EtherCard::clientIcmpRequest(const uint8_t *destip) {
     packetSend(98);
 }
 
-void EtherCard::ntpRequest (uint8_t *ntpip,uint8_t srcport) {
-    if(is_lan(myip, ntpip)) {
-        setMACandIPs(destmacaddr, ntpip);
-    } else {
-        setMACandIPs(gwmacaddr, ntpip);
-    }
-    gPB[ETH_TYPE_H_P] = ETHTYPE_IP_H_V;
-    gPB[ETH_TYPE_L_P] = ETHTYPE_IP_L_V;
-    memcpy_P(gPB + IP_P,iphdr,sizeof iphdr);
-    gPB[IP_TOTLEN_L_P] = 0x4c;
-    gPB[IP_PROTO_P] = IP_PROTO_UDP_V;
-    fill_ip_hdr_checksum();
-    gPB[UDP_DST_PORT_H_P] = 0;
-    gPB[UDP_DST_PORT_L_P] = NTP_PORT; // ntp = 123
-    gPB[UDP_SRC_PORT_H_P] = 10;
-    gPB[UDP_SRC_PORT_L_P] = srcport; // lower 8 bit of src port
-    gPB[UDP_LEN_H_P] = 0;
-    gPB[UDP_LEN_L_P] = 56; // fixed len
-    gPB[UDP_CHECKSUM_H_P] = 0;
-    gPB[UDP_CHECKSUM_L_P] = 0;
-    memset(gPB + UDP_DATA_P, 0, 48);
-    memcpy_P(gPB + UDP_DATA_P,ntpreqhdr,10);
-    fill_checksum(UDP_CHECKSUM_H_P, IP_SRC_P, 16 + 48,1);
-    packetSend(90);
-}
-
-uint8_t EtherCard::ntpProcessAnswer (uint32_t *time,uint8_t dstport_l) {
-    if ((dstport_l && gPB[UDP_DST_PORT_L_P]!=dstport_l) || gPB[UDP_LEN_H_P]!=0 ||
-            gPB[UDP_LEN_L_P]!=56 || gPB[UDP_SRC_PORT_L_P]!=0x7b)
-        return 0;
-    ((uint8_t*) time)[3] = gPB[0x52];
-    ((uint8_t*) time)[2] = gPB[0x53];
-    ((uint8_t*) time)[1] = gPB[0x54];
-    ((uint8_t*) time)[0] = gPB[0x55];
-    return 1;
-}
-
-void EtherCard::udpPrepare (uint16_t sport, const uint8_t *dip, uint16_t dport) {
-    if(is_lan(myip, dip)) {                    // this works because both dns mac and destinations mac are stored in same variable - destmacaddr
-        setMACandIPs(destmacaddr, dip);        // at different times. The program could have separate variable for dns mac, then here should be
-    } else {                                   // checked if dip is dns ip and separately if dip is hisip and then use correct mac.
-        setMACandIPs(gwmacaddr, dip);
-    }
-    // see http://tldp.org/HOWTO/Multicast-HOWTO-2.html
-    // multicast or broadcast address, https://github.com/njh/EtherCard/issues/59
-    if ((dip[0] & 0xF0) == 0xE0 || *((unsigned long*) dip) == 0xFFFFFFFF || !memcmp(broadcastip,dip,IP_LEN))
-        EtherCard::copyMac(gPB + ETH_DST_MAC, allOnes);
-    gPB[ETH_TYPE_H_P] = ETHTYPE_IP_H_V;
-    gPB[ETH_TYPE_L_P] = ETHTYPE_IP_L_V;
-    memcpy_P(gPB + IP_P,iphdr,sizeof iphdr);
-    gPB[IP_TOTLEN_H_P] = 0;
-    gPB[IP_PROTO_P] = IP_PROTO_UDP_V;
-    gPB[UDP_DST_PORT_H_P] = (dport>>8);
-    gPB[UDP_DST_PORT_L_P] = dport;
-    gPB[UDP_SRC_PORT_H_P] = (sport>>8);
-    gPB[UDP_SRC_PORT_L_P] = sport;
-    gPB[UDP_LEN_H_P] = 0;
-    gPB[UDP_CHECKSUM_H_P] = 0;
-    gPB[UDP_CHECKSUM_L_P] = 0;
-}
-
-void EtherCard::udpTransmit (uint16_t datalen) {
-    gPB[IP_TOTLEN_H_P] = (IP_HEADER_LEN+UDP_HEADER_LEN+datalen) >> 8;
-    gPB[IP_TOTLEN_L_P] = IP_HEADER_LEN+UDP_HEADER_LEN+datalen;
-    fill_ip_hdr_checksum();
-    gPB[UDP_LEN_H_P] = (UDP_HEADER_LEN+datalen) >>8;
-    gPB[UDP_LEN_L_P] = UDP_HEADER_LEN+datalen;
-    fill_checksum(UDP_CHECKSUM_H_P, IP_SRC_P, 16 + datalen,1);
-    packetSend(UDP_HEADER_LEN+IP_HEADER_LEN+ETH_HEADER_LEN+datalen);
-}
-
-void EtherCard::sendUdp (const char *data, uint8_t datalen, uint16_t sport,
-                         const uint8_t *dip, uint16_t dport) {
-    udpPrepare(sport, dip, dport);
-    if (datalen>220)
-        datalen = 220;
-    memcpy(gPB + UDP_DATA_P, data, datalen);
-    udpTransmit(datalen);
-}
-
-void EtherCard::sendWol (uint8_t *wolmac) {
-    setMACandIPs(allOnes, allOnes);
-    gPB[ETH_TYPE_H_P] = ETHTYPE_IP_H_V;
-    gPB[ETH_TYPE_L_P] = ETHTYPE_IP_L_V;
-    memcpy_P(gPB + IP_P,iphdr,9);
-    gPB[IP_TOTLEN_L_P] = 0x82;
-    gPB[IP_PROTO_P] = IP_PROTO_UDP_V;
-    fill_ip_hdr_checksum();
-    gPB[UDP_DST_PORT_H_P] = 0;
-    gPB[UDP_DST_PORT_L_P] = 0x9; // wol = normally 9
-    gPB[UDP_SRC_PORT_H_P] = 10;
-    gPB[UDP_SRC_PORT_L_P] = 0x42; // source port does not matter
-    gPB[UDP_LEN_H_P] = 0;
-    gPB[UDP_LEN_L_P] = 110; // fixed len
-    gPB[UDP_CHECKSUM_H_P] = 0;
-    gPB[UDP_CHECKSUM_L_P] = 0;
-    copyMac(gPB + UDP_DATA_P, allOnes);
-    uint8_t pos = UDP_DATA_P;
-    for (uint8_t m = 0; m < 16; ++m) {
-        pos += 6;
-        copyMac(gPB + pos, wolmac);
-    }
-    fill_checksum(UDP_CHECKSUM_H_P, IP_SRC_P, 16 + 102,1);
-    packetSend(pos + 6);
-}
-
 // make a arp request
 static void client_arp_whohas(uint8_t *ip_we_search) {
     setMACs(allOnes);
@@ -458,12 +316,6 @@ static void client_arp_whohas(uint8_t *ip_we_search) {
 }
 
 uint8_t EtherCard::clientWaitingGw () {
-    return !(waitgwmac & WGW_HAVE_GW_MAC);
-}
-
-uint8_t EtherCard::clientWaitingDns () {
-    if(is_lan(myip, dnsip))
-        return !has_dns_mac;
     return !(waitgwmac & WGW_HAVE_GW_MAC);
 }
 
@@ -538,69 +390,6 @@ uint8_t EtherCard::clientTcpReq (uint8_t (*result_cb)(uint8_t,uint8_t,uint16_t,u
     return tcp_fd;
 }
 
-static uint16_t www_client_internal_datafill_cb(uint8_t fd) {
-    BufferFiller bfill = EtherCard::tcpOffset();
-    if (fd==www_fd) {
-        if (client_postval == 0) {
-            bfill.emit_p(PSTR("GET $F$S HTTP/1.0\r\n"
-                              "Host: $F\r\n"
-                              "$F\r\n"
-                              "\r\n"), client_urlbuf,
-                         client_urlbuf_var,
-                         client_hoststr, client_additionalheaderline);
-        } else {
-            const char* ahl = client_additionalheaderline;
-            bfill.emit_p(PSTR("POST $F HTTP/1.0\r\n"
-                              "Host: $F\r\n"
-                              "$F$S"
-                              "Accept: */*\r\n"
-                              "Content-Length: $D\r\n"
-                              "Content-Type: application/x-www-form-urlencoded\r\n"
-                              "\r\n"
-                              "$S"), client_urlbuf,
-                         client_hoststr,
-                         ahl != 0 ? ahl : PSTR(""),
-                         ahl != 0 ? "\r\n" : "",
-                         strlen(client_postval),
-                         client_postval);
-        }
-    }
-    return bfill.position();
-}
-
-static uint8_t www_client_internal_result_cb(uint8_t fd, uint8_t statuscode, uint16_t datapos, uint16_t len_of_data) {
-    if (fd!=www_fd)
-        (*client_browser_cb)(4,0,0);
-    else if (statuscode==0 && len_of_data>12 && client_browser_cb) {
-        uint8_t f = strncmp("200",(char *)&(gPB[datapos+9]),3) != 0;
-        (*client_browser_cb)(f, ((uint16_t)TCP_SRC_PORT_H_P+(gPB[TCP_HEADER_LEN_P]>>4)*4),len_of_data);
-    }
-    return 0;
-}
-
-void EtherCard::browseUrl (const char *urlbuf, const char *urlbuf_varpart, const char *hoststr, void (*callback)(uint8_t,uint16_t,uint16_t)) {
-    browseUrl(urlbuf, urlbuf_varpart, hoststr, PSTR("Accept: text/html"), callback);
-}
-
-void EtherCard::browseUrl (const char *urlbuf, const char *urlbuf_varpart, const char *hoststr, const char *additionalheaderline, void (*callback)(uint8_t,uint16_t,uint16_t)) {
-    client_urlbuf = urlbuf;
-    client_urlbuf_var = urlbuf_varpart;
-    client_hoststr = hoststr;
-    client_additionalheaderline = additionalheaderline;
-    client_postval = 0;
-    client_browser_cb = callback;
-    www_fd = clientTcpReq(&www_client_internal_result_cb,&www_client_internal_datafill_cb,hisport);
-}
-
-void EtherCard::httpPost (const char *urlbuf, const char *hoststr, const char *additionalheaderline, const char *postval, void (*callback)(uint8_t,uint16_t,uint16_t)) {
-    client_urlbuf = urlbuf;
-    client_hoststr = hoststr;
-    client_additionalheaderline = additionalheaderline;
-    client_postval = postval;
-    client_browser_cb = callback;
-    www_fd = clientTcpReq(&www_client_internal_result_cb,&www_client_internal_datafill_cb,hisport);
-}
-
 static uint16_t tcp_datafill_cb(uint8_t fd) {
     uint16_t len = Stash::length();
     Stash::extract(0, len, EtherCard::tcpOffset());
@@ -612,6 +401,7 @@ static uint16_t tcp_datafill_cb(uint8_t fd) {
     Serial.println((char*) EtherCard::tcpOffset());
 #endif
     result_fd = 123; // bogus value
+
     return len;
 }
 
@@ -619,6 +409,7 @@ static uint8_t tcp_result_cb(uint8_t fd, uint8_t status, uint16_t datapos, uint1
     if (status == 0) {
         result_fd = fd; // a valid result has been received, remember its session id
         result_ptr = (char*) ether.buffer + datapos;
+        tcp_payload_length = datalen;
         // result_ptr[datalen] = 0;
         // Serial.printlnf("DATAPOS: %d, DATALEN: %d", datapos, datalen);
         // Serial.println(" <<<< ");
@@ -633,14 +424,22 @@ static uint8_t tcp_result_cb(uint8_t fd, uint8_t status, uint16_t datapos, uint1
 }
 
 uint8_t EtherCard::tcpSend () {
+    // Serial.println("tcpSend");
     www_fd = clientTcpReq(&tcp_result_cb, &tcp_datafill_cb, hisport);
     return www_fd;
 }
 
-const char* EtherCard::tcpReply (uint8_t fd) {
-    if (result_fd != fd)
+boolean EtherCard::tcpClosed() {
+    return tcp_client_state == TCP_STATE_CLOSED;
+}
+
+const char* EtherCard::tcpReply (uint8_t fd, uint16_t& len) {
+    if (result_fd != fd) {
+        // Serial.printlnf("result_fd != fd result_fd: %d fd: %d", result_fd, fd);
         return 0;
+    }
     result_fd = 123; // set to a bogus value to prevent future match
+    len = tcp_payload_length;
     return result_ptr;
 }
 
@@ -683,12 +482,6 @@ uint16_t EtherCard::accept(const uint16_t port, uint16_t plen) {
 uint16_t EtherCard::packetLoop (uint16_t plen) {
     uint16_t len;
 
-#if ETHERCARD_DHCP
-    if(using_dhcp) {
-        ether.DhcpStateMachine(plen);
-    }
-#endif
-
     if (plen==0) {
         //Check every 65536 (no-packet) cycles whether we need to retry ARP request for gateway
         if ((waitgwmac & WGW_INITIAL_ARP || waitgwmac & WGW_REFRESHING) &&
@@ -701,7 +494,7 @@ uint16_t EtherCard::packetLoop (uint16_t plen) {
 #if ETHERCARD_TCPCLIENT
         //Initiate TCP/IP session if pending
         if (tcp_client_state==TCP_STATE_SENDSYN && (waitgwmac & WGW_HAVE_GW_MAC)) { // send a syn
-        Serial.printlnf("connection no: %d", tcpclient_src_port_l);
+        // Serial.printlnf("connection no: %d", tcpclient_src_port_l);
             tcp_client_state = TCP_STATE_SYNSENT;
             tcpclient_src_port_l++; // allocate a new port
             client_syn(((tcp_fd<<5) | (0x1f & tcpclient_src_port_l)),tcp_client_port_h,tcp_client_port_l);
@@ -795,11 +588,11 @@ uint16_t EtherCard::packetLoop (uint16_t plen) {
             }
             else
             {   //Expecting SYN+ACK so reset and resend SYN
-for(uint16_t i =0; i < plen; i++ ) {
-    if(i%8 == 0 && i!=0) { Serial.print("\t"); }
-    if(i%16 == 0 && i!=0) { Serial.println("\n\r "); }
-    Serial.printf("[0x%02X] ", ether.buffer[i]);
-}
+// for(uint16_t i =0; i < plen; i++ ) {
+//     if(i%8 == 0 && i!=0) { Serial.print("\t"); }
+//     if(i%16 == 0 && i!=0) { Serial.println("\n\r "); }
+//     Serial.printf("[0x%02X] ", ether.buffer[i]);
+// }
                 tcp_client_state = TCP_STATE_SENDSYN; // retry
                 len++;
                 if (gPB[TCP_FLAGS_P] & TCP_FLAGS_ACK_V)
