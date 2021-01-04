@@ -13,6 +13,8 @@
 #include "Particle.h"
 #include "lib/EtherCard.h"
 #include <lib/ModbusTCP.h>
+void chipSelectLow(uint8_t pin);
+void chipSelectHigh();
 static void gotPinged (byte* ptr);
 void setup();
 void loop();
@@ -26,6 +28,17 @@ STARTUP(cellular_credentials_set("playmetric", "", "", NULL));
 
 Stash stash;
 
+
+
+void chipSelectLow(uint8_t pin) {
+    noInterrupts();
+    pinResetFast(pin);
+}
+
+void chipSelectHigh() {
+    pinSetFast(D5);
+    interrupts();
+}
 
 static const byte mymac[] = { 0x74,0x69,0x69,0x2D,0x30,0x31 };
 static const byte myip[] = { 10,0,0,3 };
@@ -58,7 +71,7 @@ void setup() {
 
   Serial.println("\n[getStaticIP]");
 
-  if (ether.begin(sizeof Ethernet::buffer, mymac, D5) == 0)
+  if (ether.begin(sizeof Ethernet::buffer, mymac, D5, chipSelectLow, chipSelectHigh) == 0)
     Serial.println("eth failed"); 
   ether.staticSetup(myip, gwip, NULL, mask);
   ether.persistTcpConnection(false);

@@ -29,10 +29,12 @@ uint16_t EtherCard::delaycnt = 0; //request gateway ARP lookup
 
 uint8_t EtherCard::begin (const uint16_t size,
                           const uint8_t* macaddr,
-                          uint8_t csPin) {
+                          uint8_t csPin,
+                          void (*_chipSelectLow)(uint8_t), void (*_chipSelectHigh)()
+                          ) {
     using_dhcp = false;
     copyMac(mymac, macaddr);
-    return initialize(size, mymac, csPin);
+    return initialize(size, mymac, csPin, _chipSelectLow, _chipSelectHigh);
 }
 
 bool EtherCard::staticSetup (const uint8_t* my_ip,

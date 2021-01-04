@@ -15,6 +15,9 @@ uint16_t ENC28J60::bufferSize;
 bool ENC28J60::broadcast_enabled = false;
 bool ENC28J60::promiscuous_enabled = false;
 
+static void (*chipSelectLow)(uint8_t);
+static void (*chipSelectHigh)();
+
 // ENC28J60 Control Registers
 // Control register definitions are a combination of address,
 // bank number, and Ethernet/MAC/PHY indicator bits.
@@ -238,13 +241,16 @@ void ENC28J60::initSPI () {
 }
 
 static void enableChip () {
-    noInterrupts();
-    pinResetFast(selectPin);
+    // noInterrupts();
+    // pinResetFast(selectPin);
+    chipSelectLow(selectPin);
 }
 
 static void disableChip () {
-    pinSetFast(selectPin);
-    interrupts();
+    // pinSetFast(selectPin);
+    // interrupts();
+    chipSelectHigh();
+
 }
 
 static void xferSPI (byte data) {
@@ -335,7 +341,9 @@ static void writePhy (byte address, uint16_t data) {
         ;
 }
 
-byte ENC28J60::initialize (uint16_t size, const byte* macaddr, byte csPin) {
+byte ENC28J60::initialize (uint16_t size, const byte* macaddr, byte csPin, void (*_chipSelectLow)(uint8_t), void (*_chipSelectHigh)()) {
+    chipSelectLow = _chipSelectLow;
+    chipSelectHigh = _chipSelectHigh;
     bufferSize = size;
     selectPin = csPin;
     initSPI();

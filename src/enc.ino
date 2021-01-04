@@ -18,6 +18,17 @@ STARTUP(cellular_credentials_set("playmetric", "", "", NULL));
 Stash stash;
 
 
+
+void chipSelectLow(uint8_t pin) {
+    noInterrupts();
+    pinResetFast(pin);
+}
+
+void chipSelectHigh() {
+    pinSetFast(D5);
+    interrupts();
+}
+
 static const byte mymac[] = { 0x74,0x69,0x69,0x2D,0x30,0x31 };
 static const byte myip[] = { 10,0,0,3 };
 static const byte mask[] = { 255,255,255,0 };
@@ -49,7 +60,7 @@ void setup() {
 
   Serial.println("\n[getStaticIP]");
 
-  if (ether.begin(sizeof Ethernet::buffer, mymac, D5) == 0)
+  if (ether.begin(sizeof Ethernet::buffer, mymac, D5, chipSelectLow, chipSelectHigh) == 0)
     Serial.println("eth failed"); 
   ether.staticSetup(myip, gwip, NULL, mask);
   ether.persistTcpConnection(false);
